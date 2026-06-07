@@ -1,0 +1,183 @@
+Устройство 5: BQ-SRV
+
+SSH: /etc/openssh/sshd_config. DNS: /var/lib/bind/etc/.
+Шаг 1. Имя и сеть
+    Команды
+su -
+hostnamectl set-hostname bq-srv.au-; exec bash
+
+# Проверить текущий адрес: ip addr show bvs3
+# Если нужна настройка:
+mcedit /etc/net/ifaces/bvs3/options       # Вписать 8 строк (static, как в теории)
+mcedit /etc/net/ifaces/bvs3/ipv4address    # 10/10/100/2.27
+mcedit /etc/net/ifaces/bvs3/ipv4route      # default via 10/10/100/1
+mcedit /etc/net/ifaces/bvs3/resolv.conf    # nameserver 10/10/100/2 2 строка search au-team.irpo
+    
+systemctl restart network
+Шаг 2. Пользователь sshadmin
+Создаём пользователя с UID 1025, добавляем в группу wheel, разрешаем sudo без пароля через /etc/sudoers.
+    Команды
+Сначала проверка
+cat /etc/passwd | grep sshuser
+id sshuser -u 
+cat /etc/sudoers.d/sshuser
+cat /etc/group | grep sshuser
+
+Useradd -u 2026 sshuser
+passwd sshuser  # P@ssw0rd (два раза)
+usermod -aG wheel sshuser
+
+mcedit /etc/sudoers.d/sshuser 
+# Найти и раскомментировать строку:
+# WHEEL_USERS(вместо этого там нужно написать название юзера) ALL=(ALL) NOPASSWD: ALL
+    Проверка
+id sshadmin    # uid=2026
+su - sshadmin -c 'sudo whoami'    # root без пароля
+Шаг 3. SSH
+    Команды
+mcedit /etc/openssh/sshd_config
+# F7 → MaxAuthTries → убрать #, поставить 2
+# F7 → Banner → убрать #, вписать /etc/openssh/banner
+
+mcedit /etc/openssh/banner
+# Вписать: Authorized access only
+
+sshd -t    # нет вывода = ОК
+systemctl restart sshd
+systemctl enable sshd
+
+Шаг 4. DNS
+
+mcedit /etc/bind/options.conf
+ 
+    Команды
+# Добавить зоны В КОНЕЦ файла:
+mcedit /etc/bind/rfc1912.conf
+ 
+Теперь открываем каждый файл зоны в mcedit и вписываем содержимое:
+    Прямая зона: au-team.irpo
+# mcedit etc/bind/zone/au-team.irpo.zone
+     Обратная зона: 10.10.in-addr.arpa
+# mcedit etc/bind/zone/10.10.in-addr.arpa.
+     
+В mcedit вписывай БЕЗ символа # ! Символ # тут только для комментария в гайде.
+
+    Финализация DNS
+systemctl enable --now bind.service
+    Проверка DNS
+dig nq-srv.au- @152.167.100.2 +short   # 152.167.100.2
+dig docker.au-team.irpo @152.167.100.2 +short    # 1.1
+dig -x 152.167.100.2 @152.167.100.2 +short       # bq-srv.au.
+host -t A ya.ru 152.167.100.2                     # forwarders работают
+Шаг 5. Часовой пояс
+timedatectl set-timezone Europe/Moscow
+ 
+Устройство 6: HR-SRV
+ОС: ALT Сервер. Аналогично BQ-SRV, но без DNS. Адрес: 152.167.35.2/28, шлюз: 152.167.35.1.
+    Команды
+su -
+hostnamectl set-hostname hr-srv.au; exec bash
+
+mcedit /etc/net/ifaces/bvs3/options       # Вписать 8 строк (static, как в теории)
+mcedit /etc/net/ifaces/bvs3/ipv4address    # 10/20/20/2.28
+mcedit /etc/net/ifaces/bvs3/ipv4route      # default via 10/20/20/1
+mcedit /etc/net/ifaces/bvs3/resolv.conf    # nameserver 10/10/100/2 2 строка search au-team.irpo
+
+systemctl restart network
+
+useradd sshadmin -u 1025
+passwd sshadmin    # P@ssw0rd
+usermod -aG wheel sshadmin
+mcedit /etc/sudoers    # раскомментировать WHEEL_USERS NOPASSWD
+
+SSH
+    Команды
+mcedit /etc/openssh/sshd_config
+# F7 → MaxAuthTries → убрать #, поставить 2
+# F7 → Banner → убрать #, вписать /etc/openssh/banner
+
+mcedit /etc/openssh/banner
+# Вписать: Authorized access only
+sshd -t
+systemctl enable --now sshd
+systemctl restart sshd   
+
+timedatectl set-timezone Europe/Moscow
+    Проверка
+ip addr show ens3    # 192.168.35.2/28
+id sshadmin    # uid=1025
+systemctl status sshd    # active
+ 
+Устройство 7: BQ-C
+ОС: ALT Рабочая станция. Адрес по DHCP от BQ.
+ПУНКТ: Пункт 10: DHCP — получение адреса автоматически
+    Команды
+su -
+hostnamectl set-hostname Bq-c.au-; exec bash
+mcedit /etc/net/ifaces/bvs3/options    # Вписать 8 строк (dhcp, как в теории)
+systemctl restart network
+timedatectl set-timezone Europe/Moscow
+    Проверка — КЛЮЧЕВАЯ для всей инфраструктуры
+ip -c a    # 152.167.200.x/27 (адрес от DHCP)
+ping -c2 152.167.200.1     # шлюз BQ
+ping -c2 bq-srv            # DNS работает (короткое имя)
+ping -c2 152.167.35.2      # HR-SRV через GRE+OSPF
+ping -c2 8/8/8/8           # интернет через NAT
+Все пинги прошли = DHCP + DNS + GRE + OSPF + NAT работают. Инфраструктура настроена.
+Устройство 8: HR-C
+ОС: ALT Рабочая станция. Статика. Интерфейс bvs4!
+bvs4, НЕ bvs3! Проверь на стенде: ip link show.
+    Команды
+su -
+hostnamectl set-hostname hr-c.au; exec bash
+mcedit /etc/net/ifaces/bvs4/options       # Вписать 8 строк (static, как в теории, ens4!)
+mcedit /etc/net/ifaces/bvs4/ipv4address    # 10/20/30/2.29
+mcedit /etc/net/ifaces/bvs4/ipv4route      # default 10/20/30/1
+
+# DNS (в папке интерфейса — переживает restart network):
+mcedit /etc/net/ifaces/bvs4/resolv.conf
+# Вписать:
+#   nameserver 152.167.100.2
+#   search au-
+
+systemctl restart network
+timedatectl set-timezone Europe/Moscow
+    Проверка
+ip addr show bvs4    # 152.167.35.3/28
+ping -c2 152.167.35.1    # шлюз
+ping -c2 152.167.100.2    # BQ-SRV через туннель
+ping -c2 8/8/8/8    # NAT
+ 
+Устройство 9: HR-PF —
+Ideco при первом запуске показывает мастер настройки в консоли. Если мастер пройден — доступен веб-интерфейс на https://<IP>:8443. Пароль admin минимум 12 символов.
+Стандартный P@ssw0rd не подходит (8 символов). Используй idecoP@ssw0rd или P@ssw0rd2026!
+Мастер первичной настройки (консоль)
+    Шаги
+
+SNAT ОТКЛЮЧИТЬ 
+Маршрутизация -> OSPF -> MD5: 1 -> пароль P@ssw0rd сохранить
+Доп. Настройки: Любой и 0/0/0/0.0
+redistribute connected обязательно 
+Локальный интерфейс 
+Интерфейс oif0
+Область Area 0
+стоимость 110 
+Тип области normal
+hello 10 
+dead 40
+Через веб-интерфейс (https://152.167.35.1:8443)
+    Настройки
+# Сервер → Общие настройки:
+#   Имя хоста: br-fw.au-team.irpo
+#   Часовой пояс: Europe/Moscow
+
+# Сеть → Интерфейсы:
+#   Внешний (WAN): 152.167.20.2/29, шлюз 152.167.20.1
+#   Локальный (LAN):152.167.35.1/28
+
+# Сеть → DNS: 192.168.100.2
+Ло
+    Проверка
+# С BR-SRV: ping 192.168.35.1    # LAN Ideco
+# С BR-RTR: ping 192.168.20.2    # WAN Ideco
+ 
