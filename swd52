@@ -1,0 +1,207 @@
+Устройство 1:
+Шаг 1. Имя
+    Команды
+hostnamectl set-hostname; exec bash
+    Проверка
+hostname -f   
+СОХРАНЕНИЕ: Пишет в /etc/hostname — переживает перезагрузку.
+Шаг 2. Сетевые интерфейсы
+bvs3 скорее всего уже настроен (DHCP). Проверь: grep BOOTPROTO /etc/net/ifaces/bvs3/options. Если dhcp — не трогай. Для bvs4 и bvs5 — открываем mcedit, вписываем, сохраняем.
+    Команды
+# --- bvs4 ---
+mcedit /etc/net/ifaces/bvs4/options
+# Вписать все 8 строк (как в теории, static):
+#   NM_CONTROLLED=no
+#   SYSTEMD_CONTROLLED=yes
+#   DISABLED=no
+#   TYPE=eth
+#   CONFIG_WIRELESS=no
+#   BOOTPROTO=static
+#   SYSTEMD_BOOTPROTO=static
+#   CONFIG_IPV4=yes
+
+mcedit /etc/net/ifaces/bvs4/ipv4address
+# Вписать: 1.1/28
+
+# --- bvs5 (options такой же — копируем) ---
+cp /etc/net/ifaces/bvs4/options /etc/net/ifaces/bvs5/options
+
+mcedit /etc/net/ifaces/bvs5/ipv4address
+# Вписать: 2.1/28
+
+systemctl restart network
+    Проверка
+ip -c a    # bvs3=DHCP, bvs4=1.1/28, bvs5=2.1/28
+СОХРАНЕНИЕ: Файлы в /etc/net/ifaces/ — на диске, переживают перезагрузку.
+Шаг 3. IP forwarding
+    Команды
+mcedit /etc/net/sysctl.conf
+# Найти строку net.ipv4.ip_forward = 0
+# Заменить 0 на 1
+# F2, F10
+
+systemctl restart network
+    Проверка
+sysctl net.ipv4.ip_forward    # = 1
+Шаг 4. NAT (трансляция адресов)
+Хосты офисов имеют приватные адреса — интернет их не маршрутизирует. MASQUERADE подменяет исходный IP пакета на публичный IP bvs3. Нужно два правила — по одному для каждого офиса.
+    Команды
+# Правило для BQ:
+iptables -t nat -A POSTROUTING -s 1.0/28 -o bvs3 -j MASQUERADE
+
+# Правило для HR:
+iptables -t nat -A POSTROUTING -s 2.0/28 -o bvs3 -j MASQUERADE
+
+# Сохранить правила на диск:
+iptables-save >> /etc/sysconfig/iptables
+
+# Включить службу + автозагрузка:
+systemctl enable --now iptables
+    Проверка
+iptables -t nat -L -n -v    # 2 правила MASQUERADE
+СОХРАНЕНИЕ: iptables-save + systemctl enable iptables. Служба читает /etc/sysconfig/iptables при старте.
+Шаг 5. Часовой пояс
+    Команды
+timedatectl set-timezone Europe/Moscow
+ 
+Устройство 2: BQ
+enable
+configure terminal
+hostname bq
+ip domain-name au-team.irpo
+ip route 0/0/0/0.0 1.1
+ip name-server 10/10/100/2
+# ═══ GRE-туннель ═══
+interface tunnel.0
+  description "GRE"
+  ip address 10/10/10/1.30
+  ip tunnel 1.2 2.2 mode gre
+  exit
+
+# ═══ NAT ═══
+interface isp
+  ip nat outside
+  exit
+interface vl1000-7
+  ip nat inside
+  exit
+interface vl2000-14
+  ip nat inside
+  exit
+interface vl9999-99
+  ip nat inside
+  exit
+
+ip nat pool internet 10/10/100/1-10/10/10/100/30,10/10/200/1-10/10/200/14,10/10/30/1-10/10/30/6
+ip nat source dynamic inside-to-outside pool internet overload interface isp
+# ═══ OSPF ═══
+router ospf 1
+  ospf router-id 10/10/10/1
+  passive-interface default
+  no passive-interface tunnel.0
+  network 10/10/100/0.27 area 0
+  network 10/10/200/0.28 area 0
+  network 10/10/30/0.29 area 0
+  network 10/10/10/0.30 area 0
+  exit
+interface tunnel.0
+  ip ospf authentication message-digest
+  ip ospf message-digest-key 1 md5 P@ssw0rd
+  exit
+
+# ═══ Пользователь ═══
+
+Проверка: users localdb
+username net_admin
+  password P@ssw0rd
+  role admin (нет необходимости)
+  exit
+
+# ═══ Часовой пояс ═══
+ntp timezone utc+3
+
+# ═══ СОХРАНИТЬ ═══
+write memory
+
+    Проверка
+show ip interface brief         # все интерфейсы up
+show service-instance brief     # все SI connected
+show ip ospf neighbor           # сосед 10.10.10.2 FULL (после BR-RTR)
+show ip route ospf              # маршруты к сетям HR
+show running-config dhcp-server 1
+show ip nat translations        # после ping с BQ
+СОХРАНЕНИЕ: write memory. Если не выполнить — после перезагрузки вся конфигурация пропадёт.
+
+Устройство 3: HR
+Зеркально BQ но: нет VLAN, нет DHCP, router-id другой, tunnel source/destination наоборот.
+    
+enable
+configure terminal
+hostname hr
+ip domain-name au-
+ip name-server 10/10/100/2
+ip route 0/0/0/0.0 .2.1
+interface fw
+  ip ospf authentication message-digest
+  ip ospf message-digest-key 1 md5 P@ssw0rd
+# ═══ GRE-туннель (source/dest НАОБОРОТ) ═══
+interface tunnel.0
+  description "GRE"
+  ip address 10/10/10/2.30
+  ip tunnel 2.2 1.2 mode gre
+  exit
+
+# ═══ NAT ═══
+interface isp
+  ip nat outside
+  exit
+interface fw
+  ip nat inside
+  exit
+ip nat pool internet 10/20/10/1-10/20/10/2,10/20/20/1-10/20/20/14,10/20/30/1-10/20/30/6
+ip nat source dynamic inside-to-outside pool internet overload interface isp
+
+# ═══ OSPF ═══
+router ospf 1
+  ospf router-id 10/10/10/2
+  passive-interface default
+  no passive-interface tunnel.0
+  no passive-interface fw
+  network 10/20/10/0.30 area 0
+  network 10/10/10/0.30 area 0
+  exit
+interface tunnel.0
+  ip ospf authentication message-digest
+  ip ospf message-digest-key 1 md5 P@ssw0rd
+  exit
+
+username adminnet
+  password P@ssw0rd
+  role admin
+  exit
+
+ntp timezone utc+3
+write memory
+    Проверка
+show ip interface brief
+ping 2.1    
+ping 10/10/10/1    # туннель
+show ip ospf neighbor   
+СОХРАНЕНИЕ: write memory.
+
+Устройство 4: BQ-SW — коммутатор
+ПУНКТ: Пункт 1: FQDN + Пункт 4: коммутация VLAN
+Имена портов зависят от стенда! ip link show + сверка MAC-адресов. Обычно: trunk к BQ-R, tag=120 к BQ-S, tag=220 к BQ-C.
+    Команды
+hostnamectl set-hostname bq-sw.au; exec bash
+
+apt-get install -y openvswitch
+systemctl enable --now openvswitch
+
+ovs-vsctl add-br SW
+ovs-vsctl add-port SW bvs3 trunk=120,220,888
+ovs-vsctl add-port SW bvs4 tag=120
+ovs-vsctl add-port SW bvs5 tag=220
+    Проверка
+ovs-vsctl show    # bvs3=trunk, bvs4=tag120, bvs5=tag220
+СОХРАНЕНИЕ: OVS хранит конфиг в своей БД — переживает перезагрузку.
