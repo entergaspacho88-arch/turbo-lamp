@@ -1,0 +1,1172 @@
+Задание 1: RAID 0 на BQ-SRV
+RAID — объединение нескольких дисков в один логический том. RAID 0 (stripe) = чередование данных по дискам. Скорость, БЕЗ защиты от потери диска. Размер = сумма дисков (2×1Гб = 2Гб).
+Файловая система — ext4. mkfs.ext3 и mkfs.ext4 — РАЗНЫЕ команды, не перепутай.
+/etc/fstab — что монтировать при загрузке. /etc/mdadm.conf — описание массива. Без mdadm.conf после перезагрузки массив может стать /dev/md127 вместо /dev/md0 (ядро не знает имя).
+🔍 Что проверить ДО настройки:
+cat /proc/mdstat
+# Если уже есть active md0 raid0 — массив УЖЕ собран
+ 
+df -h | grep raid
+# Если /raid уже смонтирован — fstab уже настроен
+ 
+cat /etc/fstab | grep md
+Синтаксис mdadm --create
+mdadm --create /dev/md0 --level=0 --raid-devices=2 /dev/vdb /dev/vdc
+Разбор:
+• mdadm — главная утилита управления RAID-массивами в Linux
+• --create /dev/md0 — создать массив с именем md0. Сократить: -C /dev/md0
+• --level=0 — уровень RAID. 0 = stripe. Сократить: -l 0
+• --raid-devices=2 — количество дисков. Сократить: -n 2
+• /dev/vdb /dev/vdc — какие диски (vdb/vdc на KVM, sdb/sdc на VMware)
+Короткая форма (как в видео):
+mdadm --create --verbose /dev/md0 -l 0 -n 2 /dev/vdb /dev/vdc
+# --verbose показывает что делается. Полезно но не обязательно
+Синтаксис mdadm --detail --scan
+mdadm --detail --scan --verbose | tee -a /etc/mdadm.conf
+Разбор:
+• --detail — подробная информация о массиве
+• --scan — найти все массивы в системе
+• --verbose — ещё подробнее (UUID + список устройств)
+• | tee -a файл — вывод И на экран И дописать в файл (-a = append)
+Полный алгоритм
+su -
+ 
+# ШАГ 1: посмотреть какие диски есть
+lsblk
+# Должны быть видны: vda (основной), vdb, vdc (по 1G — для RAID)
+# ОСНОВНОЙ ДИСК (vda) НЕ ТРОГАЙ
+ 
+# ШАГ 2: проверить что mdadm установлен
+rpm -qa | grep mdadm
+# Если пусто — apt-get install -y mdadm
+ 
+# ШАГ 3: создать массив — уровень 0!
+mdadm --create --verbose /dev/md0 -l 0 -n 2 /dev/vdb /dev/vdc
+# Спросит Continue creating array? — y
+ 
+# ШАГ 4: записать конфиг (видео-способ — самый чистый)
+cp /etc/mdadm.conf.sample /etc/mdadm.conf
+mdadm --detail --scan | tee -a /etc/mdadm.conf
+# Sample даёт правильную 'шапку', tee дописывает строку ARRAY
+ 
+# ШАГ 5: файловая система ext4
+mkfs.ext4 /dev/md0
+ 
+# ШАГ 6: точка монтирования
+mkdir -p /raid
+ 
+# ШАГ 7: автомонтирование через fstab
+echo '/dev/md0 /raid ext4 defaults 0 0' >> /etc/fstab
+ 
+# ШАГ 8: смонтировать
+mount -a -v
+# -a монтирует всё из fstab, -v показывает что происходит
+Формат строки fstab:
+/dev/md0 /raid ext4 defaults 0 0
+#   |      |    |       |    | |
+#   |      |    |       |    | └─ fsck order (0 = не проверять при загрузке)
+#   |      |    |       |    └─── dump priority (0 = не делать backup)
+#   |      |    |       └─────── опции: rw,suid,dev,exec,auto,nouser,async
+#   |      |    └─────────────── тип файловой системы
+#   |      └──────────────────── куда монтировать
+#   └─────────────────────────── что монтировать
+Проверка
+✔ cat /proc/mdstat — md0 active raid0 (именно raid0!)
+✔ lsblk — md0 в колонке TYPE имеет значение raid0
+✔ mdadm --detail /dev/md0 — State: clean, RAID Level: raid0, Active Devices: 2
+✔ df -h /raid — ~2G в /raid
+✔ mount | grep raid — тип ext4
+✔ cat /etc/fstab | tail -1 — наша строка на месте
+✔ cat /etc/mdadm.conf — есть строка ARRAY /dev/md0 ...
+Задание 2: NFS на BQ-SRV
+NFS — сетевая файловая система. Сервер экспортирует папку, клиенты её монтируют как локальную. Работает по порту 2049/tcp.
+/etc/exports — главный конфиг сервера. Каждая строка: /путь сеть(опции) сеть(опции)...
+Сервер: пакеты nfs-server и nfs-utils. Клиент: nfs-clients и nfs-utils.
+По заданию: клиенты NFS — BQ-C и HR-C оба, оба монтируют /mnt/nfs. Сети в сторону клиентов определяй по 'ip -br a' на каждом клиенте.
+🔍 Что проверить ДО настройки:
+systemctl is-active nfs-server
+cat /etc/exports
+exportfs -v
+Синтаксис /etc/exports
+/raid/nfs <СЕТЬ_BQ-C>(rw,sync,no_root_squash,no_subtree_check) <СЕТЬ_HR-C>(rw,sync,no_root_squash,no_subtree_check)
+Разбор:
+• /raid/nfs — какую папку отдавать. Полный путь.
+• Пробел между путём и сетью.
+• <СЕТЬ_BQ-C> и <СЕТЬ_HR-C> — две сети через пробел
+• (rw,sync,...) — опции. БЕЗ пробелов внутри скобок и между сетью и скобкой!
+Опции:
+• rw — чтение и запись
+• sync — синхронная запись (ждать подтверждения от диска перед ответом клиенту)
+• no_root_squash — root остаётся root. Без этого root превращается в nobody
+• no_subtree_check — без проверки поддерева. Быстрее. Убирает warning при exportfs
+Синтаксис exportfs
+exportfs -arv
+• -r — reexport (перечитать /etc/exports)
+• -a — all (применить ко всем экспортам)
+• -v — verbose (показать что сделано)
+Синтаксис строки fstab для NFS-клиента
+<IP_BQ-SRV>:/raid/nfs /mnt/nfs nfs defaults,_netdev 0 0
+Разбор:
+• <IP_BQ-SRV>:/raid/nfs — откуда. IP сервера : путь на сервере
+• /mnt/nfs — куда локально
+• nfs — тип ФС
+• defaults,_netdev — опции через ЗАПЯТУЮ:
+    defaults — стандартные
+    _netdev — это сетевая ФС! Дождись подъёма сети при загрузке
+✨ _netdev критичен. Без него при загрузке система пытается монтировать NFS до подъёма сети — фейл, машина зависает на boot.
+Алгоритм — сервер HQ-SRV
+su -
+ 
+# Проверить пакеты (часто уже установлены)
+apt-get install -y nfs-server nfs-utils
+ 
+# Создать папку и дать максимальные права (видео-способ)
+mkdir -p /raid/nfs
+chmod -R 777 /raid/nfs
+# 777 = все могут читать/писать. Демо-стенд, безопасность не критична
+ 
+# Открыть exports и вписать одну строку с ДВУМЯ сетями
+mcedit /etc/exports
+# Содержимое (одна строка, две сети через пробел):
+# /raid/nfs <СЕТЬ_HQ-CLI>(rw,sync,no_root_squash,no_subtree_check) <СЕТЬ_BR-CLI>(rw,sync,no_root_squash,no_subtree_check)
+ 
+# Включить сервис
+systemctl enable --now nfs-server
+ 
+# Применить экспорты
+exportfs -arv
+# Должны увидеть две строки exporting
+Алгоритм — клиенты BQ-C и HR-C
+Делается ОДИНАКОВО на обеих машинах:
+su -
+ 
+apt-get install -y nfs-clients nfs-utils
+ 
+mkdir -p /mnt/nfs
+ 
+echo '<IP_BQ-SRV>:/raid/nfs /mnt/nfs nfs defaults,_netdev 0 0' >> /etc/fstab
+ 
+mount -a -v
+# Должны увидеть строку: /mnt/nfs : successfully mounted
+Проверка
+✔ На сервере: exportfs -v — /raid/nfs c ДВУМЯ сетями (HQ-CLI и BR-CLI)
+✔ На BQ-C: df -h /mnt/nfs — видна точка
+✔ На HR-C: df -h /mnt/nfs — видна точка
+✔ На BQ-C: touch /mnt/nfs/test_hq — создаётся
+✔ На HR-C: touch /mnt/nfs/test_br — создаётся
+✔ На сервере: ls /raid/nfs/ — видит ОБА файла test_hq и test_br
+Задание 3: Chrony NTP
+NTP (Network Time Protocol) — синхронизация времени по сети. Критично для логов, криптографии (TLS, Kerberos), AD.
+Stratum — уровень точности. Stratum 0 = атомные часы. Каждый клиент берёт +1 к stratum сервера. По заданию ISP объявляет себя stratum 5, клиенты получают stratum 6.
+Chrony — современная замена ntpd. На ALT — стандарт. Конфиг /etc/chrony.conf, утилита chronyc, сервис chronyd.
+⚠ Chrony обязательно ДО Samba! Расхождение >5 минут ломает Kerberos.
+Список клиентов NTP по твоему заданию (6 клиентов):
+• ALT-машины (chrony.conf): BQ-SRV, BQ-C, HR-SRV, HR-C
+• EcoRouter (ntp server): BQ, HR
+• Сервер NTP: pas (stratum 5)
+🔍 Что проверить ДО настройки:
+systemctl is-active chronyd
+chronyc tracking
+# Если уже синхронизирован с правильным сервером — конфиг готов
+Синтаксис — сервер (pas)
+local stratum 5
+• local — 'я локальный NTP-сервер'
+• stratum 5 — объявить себя уровнем 5 даже без внешнего источника
+allow 0.0.0.0/0
+• allow — разрешить клиентам обращаться. 0.0.0.0/0 — любая сеть
+Синтаксис — клиент
+server <IP_ISP> iburst
+• server — источник времени
+• <IP_ISP> — IP NTP-сервера
+• iburst — быстрая первичная синхронизация (8 пакетов вместо 1)
+Синтаксис проверки
+chronyc sources
+• ^* — синхронизирован (главный источник)
+• ^+ — запасной источник
+• ^? — неизвестный (ещё опрашивается)
+• ^x — false ticker (отбракован)
+Алгоритм — ISP (сервер)
+su -
+apt-get install -y chrony
+mcedit /etc/chrony.conf
+ 
+# Закомментировать (#) ВСЕ существующие pool ... и server ...
+# В конец дописать две строки:
+local stratum 5
+allow 0.0.0.0/0
+ 
+systemctl enable --now chronyd
+systemctl restart chronyd
+Алгоритм — 4 ALT-клиента (HQ-SRV, HQ-CLI, BR-SRV, BR-CLI)
+Делается ОДИНАКОВО на каждой из четырёх ALT-машин:
+su -
+apt-get install -y chrony
+mcedit /etc/chrony.conf
+ 
+# Закомментировать pool и server. Дописать одну строку:
+server <IP_pas> iburst
+ 
+systemctl enable --now chronyd
+systemctl restart chronyd
+Алгоритм — оба EcoRouter (BQ и HR)
+Делается ОДИНАКОВО на обоих роутерах:
+enable
+configure terminal
+ntp server <IP_pas>
+exit
+write memory
+Проверка
+✔ На pas: chronyc tracking — Stratum: 5
+✔ На 4 ALT-клиентах: chronyc sources — ^* напротив pas
+✔ На 4 ALT-клиентах: chronyc tracking — Stratum: 6
+✔ На обоих EcoRouter: show ntp status — синхронизирован
+✔ date на разных машинах — одно и то же время с точностью до секунды
+Задание 4: Samba DC на HR-SRV
+Active Directory — служба каталогов Microsoft. Хранит учётки в LDAP. Один логин на все машины, групповые политики.
+Контроллер домена (DC) — сервер AD. Содержит базу учёток, является KDC для Kerberos, обычно сам же DNS для домена.
+Samba — свободная реализация SMB/CIFS на Linux. С Samba 4 — полноценный AD-контроллер.
+Kerberos — протокол аутентификации с билетами. Билеты подписаны и имеют срок жизни — поэтому критично синхронное время.
+Realm vs Domain. Realm — термин Kerberos, ЗАГЛАВНЫМИ (AU-TEAM.IRPO). Domain — NetBIOS-имя, до 15 символов (AU-TEAM).
+Samba DC должен быть DNS для своего домена. Регистрирует SRV-записи (_ldap._tcp, _kerberos._udp) — по ним клиенты находят DC.
+DNS-backend: SAMBA_INTERNAL vs BIND9_DLZ
+При provision указывается какой DNS-сервер использовать. SAMBA_INTERNAL — встроенный, проще, всё в одном samba-процессе. BIND9_DLZ — внешний BIND9 с модулем DLZ, сложнее, требует пакеты bind/samba-dc-bind9.
+Если в твоей методичке указано BIND9_DLZ — ставь его. Иначе SAMBA_INTERNAL по умолчанию.
+Синтаксис samba-tool domain provision
+samba-tool domain provision --use-rfc2307 --realm=AU-TEAM.IRPO --domain=AU-TEAM --server-role=dc --dns-backend=SAMBA_INTERNAL --adminpass='P@ssw0rd'
+Разбор:
+• samba-tool — главная утилита Samba
+• domain provision — создать домен с нуля. ОДИН раз в жизни домена
+• --use-rfc2307 — POSIX-расширения (uidNumber, gidNumber). Без этого Linux-клиенты не получают UID/GID
+• --realm=AU-TEAM.IRPO — Kerberos realm. ЗАГЛАВНЫМИ!
+• --domain=AU-TEAM — NetBIOS-имя. До 15 символов, без точек
+• --server-role=dc — роль контроллера
+• --dns-backend=SAMBA_INTERNAL — встроенный DNS
+• --adminpass='P@ssw0rd' — пароль администратора домена
+✨ Можно запустить samba-tool domain provision БЕЗ флагов — спросит интерактивно. Удобнее когда не помнишь точный синтаксис.
+🔍 Что проверить ДО provision:
+systemctl is-active samba
+ls /var/lib/samba/private/
+# Если есть файлы и samba active — домен уже поднят. Проверь samba-tool domain level show
+Подготовка ДО provision
+Чистка остатков (если домен уже пытались поднять):
+rm -rf /etc/samba/smb.conf
+rm -rf /var/lib/samba/*
+rm -rf /var/cache/samba/*
+Проблема DNS с docker0
+⚠ Samba регистрирует ВСЕ интерфейсы. Если на BR-SRV запущен docker — host br-srv.au-team.irpo вернёт несколько адресов (включая 172.17.0.1). Это ломает клиентов.
+Решение — ограничить интерфейсы в smb.conf:
+mcedit /etc/samba/smb.conf
+# В секцию [global] добавить:
+    interfaces = ens3 lo
+    bind interfaces only = yes
+Полный алгоритм — Samba DC
+su -
+ 
+# ШАГ 1: пакеты
+apt-get install -y task-samba-dc
+# Для BIND9_DLZ дополнительно: apt-get install -y bind bind-utils
+ 
+# ШАГ 2: hostname с FQDN
+hostnamectl set-hostname br-srv.au-team.irpo; exec bash
+ 
+# ШАГ 3: DNS на самого себя
+mcedit /etc/net/ifaces/ens3/resolv.conf
+search au-team.irpo
+nameserver <свой_IP>
+ 
+systemctl restart network
+ 
+# ШАГ 4: чистка остатков
+rm -rf /etc/samba/smb.conf
+rm -rf /var/lib/samba/*
+rm -rf /var/cache/samba/*
+ 
+# ШАГ 5: остановить конфликтующие службы
+for s in smb nmb krb5kdc slapd bind; do
+  systemctl disable $s 2>/dev/null
+  systemctl stop $s 2>/dev/null
+done
+ 
+# ШАГ 6: provision
+samba-tool domain provision \
+  --use-rfc2307 \
+  --realm=AU-TEAM.IRPO \
+  --domain=AU-TEAM \
+  --server-role=dc \
+  --dns-backend=SAMBA_INTERNAL \
+  --adminpass='P@ssw0rd'
+ 
+# ШАГ 7: krb5.conf
+cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
+ 
+# ШАГ 8: фикс docker0
+mcedit /etc/samba/smb.conf
+# В [global]: interfaces = ens3 lo, bind interfaces only = yes
+ 
+# ШАГ 9: запустить samba
+systemctl unmask samba
+systemctl enable --now samba
+Пользователи и группы bq, hr
+Твой вариант: 5 hquser + 5 bruser, группы hq и br (без префикса group_!).
+⚠ Цикл for пишется с КУДРЯВЫМИ скобками {1..5}, НЕ круглыми (1..5). Круглые дают syntax error. Это brace expansion bash.
+Синтаксис цикла for
+for i in {1..5}; do КОМАНДЫ; done
+Разбор:
+• for — ключевое слово
+• i — имя переменной
+• in — 'в чём перебирать'
+• {1..5} — brace expansion. Bash развернёт в '1 2 3 4 5'. КУДРЯВЫЕ скобки!
+• ; — разделитель команд
+• do ... done — тело цикла
+• Внутри обращение к переменной: $i (с долларом)
+Алгоритм — группы и пользователи
+# Создаём ОБЕ группы:
+samba-tool group add bq
+samba-tool group add hr
+# Имена ровно 'bq' и 'hr' — БЕЗ префикса group_!
+ 
+# 5 пользователей BQ:
+for i in {1..5}; do
+  samba-tool user create hquser$i P@ssw0rd
+  samba-tool user setexpiry hquser$i --noexpiry
+  samba-tool group addmembers hq hquser$i
+done
+ 
+# 5 пользователей HR:
+for i in {1..5}; do
+  samba-tool user create bruser$i P@ssw0rd
+  samba-tool user setexpiry bruser$i --noexpiry
+  samba-tool group addmembers br bruser$i
+done
+⚠ setexpiry --noexpiry КРИТИЧНО! По умолчанию пароль помечается как 'просрочен' при первом логине. Если не отключить — проверка увидит что пользователь не может зайти и снимет баллы.
+Разбор каждой команды:
+• samba-tool user create hquser$i P@ssw0rd — создаёт hquser1..hquser5
+• samba-tool user setexpiry hquser$i --noexpiry — снимает флаг 'пароль истёк'
+• samba-tool group addmembers hq hquser$i — добавляет в группу hq
+• Симметрично для bruser1..bruser5 и группы hr
+Проверка Samba DC
+✔ samba-tool domain level show — Domain function level: 2008_R2
+✔ samba-tool user list — Administrator + krbtgt + 5 hquser + 5 bruser
+✔ samba-tool group listmembers hq — РОВНО 5 имён
+✔ samba-tool group listmembers br — РОВНО 5 имён
+✔ host -t SRV _ldap._tcp.au-team.irpo 127.0.0.1 — ответ
+✔ host br-srv.au-team.irpo — ОДИН адрес
+✔ kinit Administrator — без ошибок (вводишь P@ssw0rd)
+✔ klist — Default principal: Administrator@AU-TEAM.IRPO
+Задание 5: Ввод BQ-C и HR-C в домен
+Ввод Linux-клиента в AD: установить sssd + krb5 + samba-клиент. Мета-пакет task-auth-ad-sssd тянет всё одной командой.
+sssd кеширует учётки на клиенте. Можно логиниться когда DC временно недоступен.
+Способы: GUI (acc — Центр управления системой) или CLI (system-auth, realm join). На ALT GUI быстрее.
+⚠ Делается ОДИНАКОВО на BQ-C и на HR-C. Меняется только 'Имя компьютера' в GUI: BQ-C или HR-C.
+🔍 Что проверить ДО ввода в домен (на КАЖДОМ клиенте):
+realm list
+# Если уже показывает au- — машина в домене
+id Administrator@au-
+Метод 1 (рекомендуется): GUI через acc
+acc = Alterator Configuration Center, графическая админка ALT. Запускается командой acc.
+su -
+ 
+# ШАГ 1: DNS на HR-SRV (контроллер домена)
+mcedit /etc/net/ifaces/ens3/resolv.conf
+search au-
+nameserver <IP_BR-SRV>
+ 
+systemctl restart network
+ 
+# ШАГ 2: проверить DNS
+host hr-srv.au-
+# Должен ответить ОДНИМ адресом HR-SRV
+ 
+# ШАГ 3: пакеты
+apt-get install -y task-auth-ad-sssd
+ 
+# ШАГ 4: запустить GUI
+acc
+В GUI:
+1. Раздел 'Пользователи' → 'Аутентификация'
+2. Радиокнопка 'Домен Active Directory'
+3. Поля:
+    Домен: AU-TEAM.IRPO
+    Рабочая группа: AU-TEAM
+    Имя компьютера: BQ-C (на BQ-C) или HR-C (на HR-C)
+4. SSSD (в единственном домене)
+5. Применить
+6. administrator / P@ssw0rd
+Метод 2: C
+# На BQ-C:
+system-auth write ad au- hr-srv.au- AU-TEAM administrator P@ssw0rd
+ 
+# На HR-C: то же самое (имя компьютера берётся из hostname)
+system-auth write ad au-team.irpo br-srv.au-team.irpo AU-TEAM administrator P@ssw0rd
+Проверка
+✔ На BQ-C: realm list — au-team.irpo, configured: kerberos-member
+✔ На HR-C: realm list — au-team.irpo, configured: kerberos-member
+✔ На BQ-C: id hquser1@au-team.irpo — показывает uid и gid
+✔ На HR-C: id bruser1@au-team.irpo — показывает uid и gid
+✔ На BQ-C: su - hquser1@au-team.irpo — заходит
+✔ На HR-C: su - bruser1@au-team.irpo — заходит
+✔ systemctl status sssd — active (running)
+
+Задание 6: Ограничение логина по группам
+По заданию: пользователи группы bq должны логиниться ТОЛЬКО на BQ-C, группы hr — ТОЛЬКО на HR-C. По умолчанию AD пускает любого доменного пользователя на любую машину — это надо ограничить.
+Проверка может быть такой: проверяющий пробует bruser1 на BQ-C — должно НЕ пустить. И hquser1 на HR-C — тоже НЕ пустить.
+Способ 1 (проще): через sssd.conf
+sssd.conf — конфигурация System Security Services Daemon. access_provider=simple включает простой контроль доступа по группам. simple_allow_groups задаёт список разрешённых групп.
+На BQ-C:
+su -
+mcedit /etc/sssd/sssd.conf
+ 
+# В секцию [domain/au-] добавить:
+access_provider = simple
+simple_allow_groups = bq
+ 
+systemctl restart sssd
+На HR-C:
+su -
+mcedit /etc/sssd/sssd.conf
+ 
+# В секцию [domain/au-team.irpo] добавить:
+access_provider = simple
+simple_allow_groups = hr
+ 
+systemctl restart sssd
+Способ 2: через realm permit
+# На BQ-C:
+realm deny --all
+realm permit -g hq@au-team.irpo
+ 
+# На HR-C:
+realm deny --all
+realm permit -g br@au-
+✨ Administrator должен оставаться доступным! Если ограничение его блокирует — добавь явно: simple_allow_users = administrator@au-team.irpo. Проверь после применения что Administrator всё ещё может зайти.
+Проверка
+✔ На BQ-C: su - hquser1@au- — ЗАХОДИТ
+✔ На BQ-C: su - bruser1@au- — НЕ ПУСКАЕТ
+✔ На HR-C: su - bruser1@au- — ЗАХОДИТ
+✔ На HR-C: su - hquser1@au- — НЕ ПУСКАЕТ
+✔ Administrator может войти на обе машины
+Задание 7: libnss-role + sudo для группы bq
+По практикуму ALT-способ — связать доменную группу hq с локальной группой wheel через libnss-role, и выдать в sudoers правило для wheel/hq.
+libnss-role — модуль NSS на ALT, который сопоставляет доменные группы с локальными ролями.
+По твоему заданию: пользователи группы hq могут выполнять с sudo ТОЛЬКО cat, grep, id. Остальное — запрещено.
+Синтаксис правила sudoers
+%hq ALL=(ALL) /usr/bin/cat, /usr/bin/grep, /usr/bin/id
+Разбор:
+• %hq — кто. % = группа
+• ALL — на каких хостах. ALL = на любом
+• =(ALL) — от чьего имени. (ALL) = любого
+• /usr/bin/cat, /usr/bin/grep, /usr/bin/id — список разрешённых команд через запятую. ОБЯЗАТЕЛЬНО полные пути!
+⚠ Полные пути обязательны! Если написать просто cat — пользователь сможет подсунуть свой /home/user/cat, который на самом деле rm -rf /. Безопасность через явный путь.
+Алгоритм — на BQ-C
+su -
+ 
+# ШАГ 1: установить libnss-role
+apt-get install -y libnss-role
+ 
+# ШАГ 2: включить модуль
+control libnss-role
+# Должно показать enabled. Если нет — control libnss-role enabled
+ 
+# ШАГ 3: связать доменную группу hq с локальной wheel
+roleadd hq wheel
+ 
+# ШАГ 4: правило в sudoers
+mcedit /etc/sudoers.d/hq
+# Вписать одну строку:
+%hq ALL=(ALL) /usr/bin/cat, /usr/bin/grep, /usr/bin/id
+ 
+chmod 440 /etc/sudoers.d/hq
+# 440 = чтение для root. sudo откажется работать если права не 440
+ 
+# ШАГ 5: проверка синтаксиса
+visudo -c
+Проверка
+✔ На BQ-C: su - hquser1@au-team.irpo → sudo cat /etc/hostname — РАБОТАЕТ
+✔ Тот же: sudo grep root /etc/passwd — РАБОТАЕТ
+✔ Тот же: sudo id — РАБОТАЕТ
+✔ Тот же: sudo vim /tmp/x — ОТКАЗ
+✔ Тот же: sudo ls / — ОТКАЗ
+✔ Тот же: sudo reboot — ОТКАЗ
+Задание 8: Ansible на HR-SRV
+Ansible — система автоматизации конфигурации. Управляет машинами по SSH, не требует агентов.
+Inventory — список хостов. /etc/ansible/hosts. Формат INI.
+Модуль ping — проверка связности. Отправляет Python-код по SSH, ожидает 'pong'. НЕ ICMP.
+По твоему заданию инвентарь (5 хостов):
+• BQ-SRV, BQ-C, BQ, HR, HR-C
+• HR-SRV сам контроллер — не входит в инвентарь
+🔍 Что проверить ДО настройки:
+which ansible
+rpm -qa | grep ansible
+rpm -qa | grep sshpass
+cat /etc/ansible/hosts 2>/dev/null
+Синтаксис строки inventory
+hq-srv ansible_host=10.10.100.2 ansible_user=sshadmin ansible_password=P@ssw0rd ansible_port=2026
+Разбор:
+• bq-srv — имя хоста для Ansible (любое)
+• ansible_host=IP — реальный IP для SSH
+• ansible_user=sshadmin — под кем подключаться (на серверах преднастроен sshadmin, UID 1025)
+• ansible_password=P@ssw0rd — пароль (требует пакет sshpass)
+• ansible_port=2026 — порт SSH. Для серверов — 2026 (из преднастройки Модуля 1!)
+Синтаксис ansible.cfg
+[defaults] inventory=... host_key_checking=False remote_user=sshadmin
+Разбор:
+• [defaults] — секция глобальных настроек
+• inventory — путь к файлу инвентаря
+• host_key_checking = False — отключить SSH host key prompt
+• remote_user = sshadmin — под кем подключаться по умолчанию
+• interpreter_python = /usr/bin/python3 — путь к Python на удалённом хосте (без неё warning)
+• [privilege_escalation] — секция повышения привилегий
+• become = True — повышать привилегии
+• become_method = sudo — через sudo
+Особенность EcoRouter в Ansible
+В Ansible нет 'ecorouter' как сетевого модуля. Используется ansible_network_os=ios (Cisco IOS — синтаксис совпадает).
+bq ansible_host=172.16.1.2 ansible_user=adminnet ansible_password=P@ssw0rd ansible_connection=network_cli ansible_network_os=ios
+• ansible_connection=network_cli — подключение через CLI (а не SSH к Linux)
+• ansible_network_os=ios — Ansible общается с роутером как с Cisco IOS
+⚠ На EcoRouter нужно отключить security warnings, иначе ansible получает мусор в выводе:
+# На каждом EcoRouter:
+configure terminal
+security none
+exit
+write memory
+Полный алгоритм
+su -
+ 
+# ШАГ 1: пакеты
+apt-get install -y ansible sshpass
+ 
+# ШАГ 2 (видео): доп. коллекции для сетевых устройств
+ansible-galaxy collection install ansible.netcommon
+ansible-galaxy collection install cisco.ios
+ 
+# ШАГ 3 (видео): pylibssh для production-grade SSH
+apt-get install -y python3-module-pip
+pip3 install ansible-pylibssh
+ 
+# ШАГ 4: проверить путь к Python
+which python3
+# Должно быть /usr/bin/python3
+ 
+# ШАГ 5: ansible.cfg
+mcedit /etc/ansible/ansible.cfg
+Содержимое /etc/ansible/ansible.cfg:
+[defaults]
+inventory = /etc/ansible/hosts
+host_key_checking = False
+remote_user = sshadmin
+interpreter_python = /usr/bin/python3
+ 
+[privilege_escalation]
+become = True
+become_method = sudo
+# ШАГ 6: inventory
+mcedit /etc/ansible/hosts
+Содержимое /etc/ansible/hosts (подставь свои IP, 5 хостов):
+[servers]
+bq-srv ansible_host=<IP_BQ-SRV> ansible_user=sshadmin ansible_password=P@ssw0rd ansible_port=2026
+ 
+[clients]
+bq-c ansible_host=<IP_BQ-C> ansible_user=user ansible_password=resu
+hr-c ansible_host=<IP_HR-C> ansible_user=user ansible_password=resu
+ 
+[routers]
+bq ansible_host=<IP_BQ> ansible_user=adminnet ansible_password=P@ssw0rd ansible_connection=network_cli ansible_network_os=ios
+hr ansible_host=<IP_HR> ansible_user=adminnet ansible_password=P@ssw0rd ansible_connection=network_cli ansible_network_os=ios
+✨ Видео показывает альтернативу для ALT-клиентов: ansible_user=root ansible_password=toor — чтобы не возиться с sudoers. Удобно если разрешён root SSH.
+# ШАГ 7: проверка
+ansible all -m ping
+# Все 5 хостов должны вернуть pong зелёным
+Проверка
+✔ ansible-inventory --list — все 5 хостов
+✔ ansible all -m ping — все SUCCESS, ping: pong
+✔ ansible hq-srv -m ping — отдельный сервер работает
+✔ ansible br-cli -m ping — отдельный клиент работает
+✔ ansible hq-rtr -m ios_command -a 'commands=show version' — роутер отвечает
+Задание 9: Docker tespapp + db на HR-SRV
+Docker — платформа контейнеризации. Контейнер = изолированный процесс с собственной ФС, использующий ядро хоста.
+docker-compose — запуск многоконтейнерных приложений. YAML описание стека.
+По твоему заданию: основной контейнер testapp ДОЛЖЕН НАЗЫВАТЬСЯ 'tespapp' (именно с опечаткой!) + контейнер db. Образы site_latest и mariadb_latest из /Additional.iso/docker/.
+⚠ ВАЖНО: имя контейнера в задании написано как 'tespapp' (с опечаткой 'tesp', не 'test'). Это НЕ ошибка ввода — пиши именно как в задании. Проверка может буквально матчить container_name.
+⚠ Видео показывает: на стенде Docker УЖЕ установлен и контейнеры могут быть УЖЕ запущены (но возможно с НЕправильным именем testapp), сделаны не через docker compose. По заданию требуется именно через compose с именем 'tespapp' — нужно остановить старое и перезапустить с правильным именем.
+🔍 Что проверить ДО настройки:
+rpm -qa docker*
+# Должны увидеть docker-engine, docker-cli, docker-compose-v2 и т.д.
+ 
+systemctl is-active docker
+ 
+docker ps
+# Если контейнеры уже запущены — посмотри какое у них имя
+ 
+docker compose ps
+# Если 'no configuration file provided: not found' — контейнеры запущены БЕЗ compose
+Подключение Additional.iso
+# Проверить смонтирован ли уже
+df -h | grep loop
+# Если /dev/loop0 на /mnt — уже смонтирован
+ 
+# Если нет — смонтировать (видео-команда):
+mount -o loop,ro -t iso9660 /home/user/Additional.iso /mnt/
+ 
+ls /mnt/
+# Должно быть: Users.csv  docker  playbook  web
+Что внутри /mnt/docker/
+ls /mnt/docker/
+# mariadb_latest.tar  postgresql_latest.tar  readme.txt  site_latest.tar
+ 
+cat /mnt/docker/readme.txt
+# Описание переменных для compose. Главное:
+Из readme.txt — переменные для tespapp:
+DB_TYPE   = mariadb | postgres
+DB_HOST   = <IPv4 СУБД>
+DB_NAME   = <название БД>
+DB_PORT   = <порт TCP подключения к БД>
+DB_USER   = <пользователь СУБД>
+DB_PASS   = <пароль пользователя СУБД>
+Из readme.txt — переменные для mariadb:
+MARIADB_DATABASE = <название БД>
+MARIADB_USER     = <пользователь СУБД>
+MARIADB_PASSWORD = <пароль пользователя СУБД>
+MARIADB_ROOT_PASSWORD       \__ обязателен ОДИН из двух
+MARIADB_RANDOM_ROOT_PASSWORD /
+Загрузка образов
+# Перенаправление stdin (видео-способ):
+docker load < /mnt/docker/mariadb_latest.tar
+docker load < /mnt/docker/site_latest.tar
+ 
+# Альтернатива через -i:
+docker load -i /mnt/docker/mariadb_latest.tar
+docker load -i /mnt/docker/site_latest.tar
+ 
+# Проверить
+docker image ls
+# Должны быть site:latest и mariadb:latest
+Сценарий 'контейнеры уже запущены' (с любым именем)
+# Посмотреть имена существующих контейнеров:
+docker ps -a
+ 
+# Остановить и удалить ВСЕ старые контейнеры:
+docker stop $(docker ps -aq) 2>/dev/null
+docker rm $(docker ps -aq) 2>/dev/null
+ 
+# Дальше — обычный путь через compose с правильным именем 'tespapp'
+Создание compose.yaml
+mkdir -p /opt/tespapp
+cd /opt/tespapp
+mcedit compose.yaml
+Содержимое compose.yaml (имя сервиса И container_name = tespapp):
+version: '3'
+services:
+  tespapp:
+    container_name: tespapp
+    image: site:latest
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+    environment:
+      - DB_TYPE=mariadb
+      - DB_HOST=db
+      - DB_NAME=testdb
+      - DB_PORT=3306
+      - DB_USER=test
+      - DB_PASS=P@ssw0rd
+    restart: always
+ 
+  db:
+    container_name: db
+    image: mariadb:latest
+    environment:
+      - MARIADB_DATABASE=testdb
+      - MARIADB_USER=test
+      - MARIADB_PASSWORD=P@ssw0rd
+      - MARIADB_ROOT_PASSWORD=P@ssw0rd
+    restart: always
+⚠ YAML чувствителен к пробелам! ТОЛЬКО пробелы (2 на уровень), НЕ табы. Ошибка 'expected mapping' = проверь отступы.
+# Запуск стека:
+docker compose up -d
+# -d = detached (в фоне)
+Проверка
+✔ docker compose ps — tespapp и db в статусе Up
+✔ docker ps — оба контейнера, имя 'tespapp' (с опечаткой как в задании)
+✔ curl http://localhost:8080 — отвечает HTML 'Очень нужный и важный сайт'
+✔ С HQ-CLI: curl http://<IP_BR-SRV>:8080 — открывается
+✔ docker logs tespapp — без критических ошибок
+Задание 10: Apache + MariaDB на BQ-SRV
+LAMP-стек: Linux + Apache + MariaDB + PHP. На ALT Apache называется httpd2 (НЕ apache2!).
+MariaDB — свободный форк MySQL. Команды и SQL почти идентичны.
+PHP подключается к MariaDB через mysqlnd. Без него страница покажет 'call to undefined function mysqli_connect'.
+⚠ Видео показывает: на стенде MariaDB и Apache УЖЕ установлены, БД webdb создана, пользователь web существует. Но в /var/www/html/index.php стоят неправильные значения подключения. Главная задача — поправить index.php и убедиться что всё работает.
+🔍 Что проверить ДО настройки:
+rpm -qa mariadb*
+rpm -qa apache*
+# Часто УЖЕ установлены: mariadb-server, apache2-base, apache2-httpd-worker
+ 
+systemctl is-active httpd2 mariadb
+ 
+ls /home/user/
+# Additional.iso должен быть здесь
+ 
+ls /var/www/html/
+# Если есть index.php — почти всё преднастроено
+ 
+mariadb -u root -e 'SHOW DATABASES;'
+# Если webdb уже есть — импорт сделан
+Структура сценария 'почти всё преднастроено'
+Из видео: на стенде типично — БД webdb уже создана, пользователь web уже создан, дамп уже импортирован. НО:
+• В таблице employees может быть тестовая запись DemoTest
+• /var/www/html/index.php содержит шаблонные значения (user/password/db) — нужно исправить
+• Логотип может быть свой (не из задания)
+Поэтому минимальный набор действий:
+1. Подключить Additional.iso
+2. Скопировать index.php и logo.png из /mnt/web в /var/www/html/
+3. Проверить/изменить пароль пользователя web на P@ssw0rd
+4. Поправить index.php (servername/username/password/dbname)
+5. systemctl restart httpd2
+Синтаксис SQL
+CREATE USER 'web'@'localhost' IDENTIFIED BY 'P@ssw0rd';
+• 'web' — имя пользователя в кавычках
+• @'localhost' — откуда подключается. localhost = только отсюда. % = с любого хоста
+• IDENTIFIED BY 'пароль' — пароль
+ALTER USER 'web'@'localhost' IDENTIFIED BY 'P@ssw0rd';
+Изменить пароль СУЩЕСТВУЮЩЕГО пользователя (типичный сценарий на стенде)
+GRANT ALL PRIVILEGES ON webdb.* TO 'web'@'localhost' WITH GRANT OPTION;
+• ALL PRIVILEGES — все права
+• ON webdb.* — на какую базу. * = все таблицы
+• TO 'user'@'host' — кому
+• WITH GRANT OPTION — может выдавать права другим
+✨ DROP DATABASE webdb + CREATE DATABASE webdb СОХРАНЯЕТ пользователя web и его пароль/права! Полезно когда нужно перезалить дамп с нуля — пользователь не пересоздаётся.
+Полный алгоритм
+su -
+ 
+# ШАГ 1: пакеты (часто уже установлены)
+apt-get install -y apache2 mariadb-server php8.2 php8.2-mysqlnd
+# Если php8.2 нет: apt-cache search php | grep mysql
+ 
+systemctl enable --now mariadb
+systemctl enable --now httpd2
+# На ALT именно httpd2!
+ 
+# ШАГ 2: смонтировать Additional.iso
+mkdir -p /mnt/cd-rom
+mount -o ro -t iso9660 /home/user/Additional.iso /mnt/cd-rom
+ 
+ls /mnt/cd-rom/web/
+# Должно быть: dump.sql  index.php  logo.png
+ 
+# ШАГ 3: скопировать веб-файлы
+cp /mnt/cd-rom/web/index.php /var/www/html/
+cp /mnt/cd-rom/web/logo.png /var/www/html/
+# По практикуму — 'images директорию'. Если её нет — пропускай
+ 
+# ШАГ 4: подключиться к MariaDB
+mariadb -u root
+В консоли MariaDB:
+-- Проверить что есть
+SHOW DATABASES;
+-- Если webdb есть — переходим
+ 
+USE webdb;
+SHOW TABLES;
+-- Должна быть таблица employees
+ 
+SELECT * FROM employees;
+-- Посмотреть данные. Может быть тестовая запись
+ 
+SELECT User FROM mysql.user;
+-- Проверить что есть пользователь web
+ 
+SHOW GRANTS FOR 'web'@'localhost';
+-- Должно быть: GRANT ALL PRIVILEGES ON webdb.* TO 'web'@'localhost'
+ 
+-- Если пользователя web НЕТ — создать:
+CREATE USER 'web'@'localhost' IDENTIFIED BY 'P@ssw0rd';
+GRANT ALL PRIVILEGES ON webdb.* TO 'web'@'localhost' WITH GRANT OPTION;
+ 
+-- Если web ЕСТЬ но пароль может быть другой — обновить:
+ALTER USER 'web'@'localhost' IDENTIFIED BY 'P@ssw0rd';
+ 
+FLUSH PRIVILEGES;
+EXIT;
+Сценарий: дамп нужно перезалить
+# Войти под root и пересоздать БД (пользователь web остаётся!):
+mariadb -u root
+DROP DATABASE webdb;
+CREATE DATABASE webdb;
+EXIT;
+ 
+# Импортировать дамп под пользователем web:
+mariadb -u web -pP@ssw0rd -D webdb < /mnt/cd-rom/web/dump.sql
+# -p без пробела перед паролем!
+Правка index.php
+mcedit /var/www/html/index.php
+ 
+# Изначальные (неправильные) значения:
+# $servername = "localhost";
+# $username   = "user";
+# $password   = "password";
+# $dbname     = "db";
+ 
+# Поменять на:
+# $servername = "localhost";   <- НЕ ТРОГАТЬ — Apache на той же машине что MariaDB
+# $username   = "web";
+# $password   = "P@ssw0rd";
+# $dbname     = "webdb";
+# Применить правки
+systemctl restart httpd2
+Проверка
+✔ systemctl status httpd2 — active (running)
+✔ mariadb -u web -pP@ssw0rd webdb -e 'SHOW TABLES;' — таблицы
+✔ curl http://localhost — страница 'Задание 7 модуль 2'
+✔ С HQ-CLI в браузере: http://<IP_HQ-SRV> — страница с записями
+Задание 11: Проброс портов (8080 + 2026)
+Static NAT (port forwarding) — перенаправление входящих соединений с публичного IP+порта на внутренний IP+порт.
+По твоему заданию (из практикума):
+• HR: 8080 → testapp на HR-SRV (порт 8080), 2026 → SSH HR-SRV
+• BQ: 8080 → веб-приложение на BQ-SRV (Apache на порту 80!), 2026 → SSH BQ-SRV
+⚠ ВНИМАТЕЛЬНО! BR-RTR: внешний 8080 → внутренний 8080 (testapp слушает 8080). HQ-RTR: внешний 8080 → внутренний 80 (Apache слушает 80, не 8080). Порты РАЗНЫЕ!
+Терминология EcoRouter Camellia (видео-стенд)
+В синтаксисе EcoRouter Camellia версии 14/05/2024 (видео) NAT прописывается через две команды: ip nat source static (что делать когда пакет идёт ИЗНУТРИ — куда отправить с какого внешнего IP) и ip nat destination static (что делать когда пакет идёт ИЗВНЕ на внешний IP — куда перенаправить внутрь).
+Hairpin NAT — когда внутренний клиент обращается к ВНЕШНЕМУ IP роутера (как будто из интернета). Без hairpin destination правило не срабатывает в этом сценарии. С hairpin — пакет 'разворачивается' и приходит к нужному внутреннему хосту.
+⚠ Видео-открытие: в стенде ЧАСТО ПРЕДНАСТРОЕНЫ только source-правила. Чтобы внешние клиенты (и hairpin) работали — нужно ДОБАВИТЬ destination-правила с hairpin.
+⚠ Hairpin нужен ТОЛЬКО для destination, для source не нужен!
+Синтаксис NAT в EcoRouter Camellia
+ip nat source static tcp <inside_ip> <inside_port> <outside_ip> <outside_port>
+• source — обработка пакетов ИЗНУТРИ → НАРУЖУ
+• static — статическое (неизменяемое) правило
+• tcp — протокол
+• <inside_ip> <inside_port> — внутренний адрес+порт
+• <outside_ip> <outside_port> — внешний адрес+порт
+ip nat destination static tcp <outside_ip> <outside_port> <inside_ip> <inside_port> hairpin
+• destination — обработка пакетов СНАРУЖИ → ВНУТРЬ
+• Порядок IP инвертирован: сначала outside, потом inside
+• hairpin — обязательная добавка для работы изнутри собственной сети
+Алгоритм — BR-RTR
+Сначала смотрим что уже есть:
+br-rtr#sh run | include ip nat
+# Типичная преднастройка:
+#  ip nat outside
+#  ip nat inside
+#  ip nat source static tcp 10.20.20.2 8080 172.16.2.2 8080
+#  ip nat source static tcp 10.20.20.2 2026 172.16.2.2 2026
+#  ip nat pool BR 10.10.0.0-10.20.30.255
+#  ip nat source dynamic inside-to-outside pool BR overload interface ISP
+ 
+# Source-правила есть. Не хватает destination-правил с hairpin
+Добавляем destination-правила:
+enable
+configure terminal
+ 
+# Для testapp (8080 → 8080):
+ip nat destination static tcp 172.16.2.2 8080 10.20.20.2 8080 hairpin
+ 
+# Для SSH (2026 → 2026):
+ip nat destination static tcp 172.16.2.2 2026 10.20.20.2 2026 hairpin
+ 
+exit
+write memory
+Итоговый sh run | include ip nat должен быть:
+ ip nat outside
+ ip nat inside
+ip nat source static tcp 10.20.20.2 8080 172.16.2.2 8080
+ip nat source static tcp 10.20.20.2 2026 172.16.2.2 2026
+ip nat destination static tcp 172.16.2.2 8080 10.20.20.2 8080 hairpin
+ip nat destination static tcp 172.16.2.2 2026 10.20.20.2 2026 hairpin
+ip nat pool BR 10.10.0.0-10.20.30.255
+ip nat source dynamic inside-to-outside pool BR overload interface ISP
+Алгоритм — HQ-RTR (порты разные!)
+Сначала смотрим что есть:
+hq-rtr#sh run | include ip nat
+# Типичная преднастройка:
+#  ip nat source static tcp 10.10.100.2 80 172.16.1.2 8080
+#  ip nat source static tcp 10.10.100.2 2026 172.16.1.2 2026
+#  ip nat pool HQ 10.10.30.0-10.10.200.255
+#  ip nat source dynamic inside-to-outside pool HQ overload interface ISP
+ 
+# Обрати внимание: 80 (Apache) → 8080 (внешний). Порты РАЗНЫЕ!
+Добавляем destination-правила (с разными портами!):
+enable
+configure terminal
+ 
+# Для веб-приложения (внешний 8080 → внутренний 80):
+ip nat destination static tcp 172.16.1.2 8080 10.10.100.2 80 hairpin
+ 
+# Для SSH (2026 → 2026):
+ip nat destination static tcp 172.16.1.2 2026 10.10.100.2 2026 hairpin
+ 
+exit
+write memory
+⚠ На HQ-RTR в destination-правиле для веб-приложения порты СОВПАДАЮТ с source: 8080 снаружи, 80 внутри. На BR-RTR оба порта 8080 (потому что testapp слушает 8080).
+Проверка SSH через проброс
+# С HQ-CLI или ISP:
+ 
+# Без порта — попадаем на сам ROUTER (порт 22 EcoRouter):
+ssh adminnet@172.16.1.2
+# Логин в EcoRouterOS: 'EcoRouterOS version Camellia ...'
+ 
+# С портом 2026 — попадаем на СЕРВЕР за роутером:
+ssh -p 2026 sshadmin@172.16.1.2
+# Логин в bash: '[sshadmin@hq-srv ~]$'
+Проверка
+✔ BR-RTR: show ip nat translations — видны source И destination записи
+✔ HQ-RTR: show ip nat translations — видны source И destination записи
+✔ С HQ-CLI: curl http://<WAN_BR-RTR>:8080 — testapp
+✔ С HQ-CLI: curl http://<WAN_HQ-RTR>:8080 — Apache
+✔ С HQ-CLI: ssh -p 2026 sshadmin@<WAN_BR-RTR> — заходит на BR-SRV
+✔ С HQ-CLI: ssh -p 2026 sshadmin@<WAN_HQ-RTR> — заходит на HQ-SRV
+✔ С самого BR-SRV: curl http://<WAN_BR-RTR>:8080 — РАБОТАЕТ (благодаря hairpin)
+Задание 12: Nginx reverse proxy на ISP
+Reverse proxy — принимает запросы клиентов, пересылает на бэкенды. Один публичный IP на много сайтов — прокси выбирает бэкенд по Host: заголовку (виртуальные хосты).
+На ALT конфиги nginx разделены: /etc/nginx/sites-available.d/ — все возможные конфиги, /etc/nginx/sites-enabled.d/ — те, что РЕАЛЬНО работают (это просто симлинки на available).
+По задаче: web.au-team.irpo → веб-приложение на HQ-SRV (через WAN_HQ-RTR:8080); docker.au-team.irpo → testapp на BR-SRV (через WAN_BR-RTR:8080). DNS-записи добавляются в /etc/hosts на HQ-CLI (Samba DNS их не знает).
+🔍 Что проверить ДО настройки:
+systemctl is-active nginx
+ls /etc/nginx/sites-available.d/
+ls /etc/nginx/sites-enabled.d/
+ 
+# С HQ-CLI:
+host docker.au-team.irpo
+# Если не разрешается — добавить в /etc/hosts на HQ-CLI
+Синтаксис server-блока
+server { listen 80; server_name web.au-team.irpo; location / { proxy_pass http://...; } }
+• server { ... } — один виртуальный хост
+• listen 80 — на каком порту слушать
+• server_name — какому Host: соответствовать
+• location / — для каких URI применять (/ = всё)
+• proxy_pass — куда передавать запрос
+⚠ Видео-открытие: правка файла в sites-available.d/ НЕ применится сама. Нужен симлинк в sites-enabled.d/!
+Алгоритм — на ISP
+su -
+apt-get install -y nginx
+ 
+# ШАГ 1: создать конфиг в sites-available.d/
+mcedit /etc/nginx/sites-available.d/reverse-proxy.conf
+Содержимое /etc/nginx/sites-available.d/reverse-proxy.conf:
+server {
+    listen 80;
+    server_name web.au-team.irpo;
+ 
+    location / {
+        # Basic Auth подключим в следующем задании:
+        # auth_basic "Restricted Access";
+        # auth_basic_user_file /etc/nginx/.htpasswd;
+ 
+        proxy_pass http://<WAN_HQ-RTR>:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+ 
+server {
+    listen 80;
+    server_name docker.au-team.irpo;
+ 
+    location / {
+        proxy_pass http://<WAN_BR-RTR>:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+# ШАГ 2: проверить синтаксис (ВСЕГДА после правки)
+nginx -t
+# Должно быть 'syntax is ok' и 'test is successful'
+ 
+# ШАГ 3: создать симлинк в sites-enabled.d/
+ln -s /etc/nginx/sites-available.d/reverse-proxy.conf /etc/nginx/sites-enabled.d/
+# Без этого симлинка nginx НЕ ПРИМЕНИТ конфиг!
+ 
+# ШАГ 4: применить
+systemctl enable --now nginx
+systemctl reload nginx
+DNS-записи на HQ-CLI
+# На HQ-CLI:
+mcedit /etc/hosts
+ 
+# Добавить:
+<IP_ISP>  web.au-team.irpo
+<IP_ISP>  docker.au-team.irpo
+# Это потому что Samba DNS не знает этих имён, а HQ-CLI
+# смотрит DNS на BR-SRV (контроллер домена)
+Проверка
+✔ На ISP: nginx -t — syntax is ok
+✔ На ISP: ls /etc/nginx/sites-enabled.d/ — симлинк есть
+✔ С HQ-CLI: curl -H 'Host: web.au-team.irpo' http://<IP_ISP> — Apache
+✔ С HQ-CLI: curl -H 'Host: docker.au-team.irpo' http://<IP_ISP> — testapp
+✔ С HQ-CLI в браузере: http://web.au-team.irpo — открывается
+✔ С HQ-CLI в браузере: http://docker.au-team.irpo — открывается
+Задание 13: Basic Auth (htpasswd) на ISP
+HTTP Basic Auth — простейшая HTTP-аутентификация. Браузер показывает окно ввода логина/пароля. Передаются в заголовке Authorization (base64).
+Файл htpasswd — хранит login:зашифрованный_пароль (по умолчанию используется bcrypt или MD5-crypt).
+⚠ На ALT пакет утилиты называется apache2-htpasswd, НЕ apache2-utils! В видео это явно показано: apt-get install apache2-htpasswd.
+Синтаксис htpasswd
+htpasswd -c /etc/nginx/.htpasswd WEB
+Разбор:
+• htpasswd — утилита (пакет apache2-htpasswd на ALT)
+• -c — create новый файл. ОСТОРОЖНО: перезаписывает существующий!
+• /etc/nginx/.htpasswd — путь к файлу
+• WEB — логин
+• Пароль спросит интерактивно (введёшь P@ssw0rd дважды)
+htpasswd -bc /etc/nginx/.htpasswd WEB P@ssw0rd
+• -b — batch mode, пароль из командной строки
+• Это ОДНОСТРОЧНЫЙ вариант — без интерактива
+Подключение к nginx
+auth_basic "Restricted"; auth_basic_user_file /etc/nginx/.htpasswd;
+• auth_basic "текст" — включить, текст в окне ввода
+• auth_basic_user_file — файл с пользователями
+Алгоритм
+su -
+ 
+# ШАГ 1: установить утилиту
+apt-get update
+apt-get install -y apache2-htpasswd
+# Если не нашлось — попробуй httpd-tools
+ 
+# ШАГ 2: создать .htpasswd с пользователем WEB
+htpasswd -c /etc/nginx/.htpasswd WEB
+# Введи P@ssw0rd дважды
+ 
+# ШАГ 3: подключить в конфиг nginx
+mcedit /etc/nginx/sites-available.d/reverse-proxy.conf
+ 
+# В блоке server_name web.au-team.irpo внутри location / РАСКОММЕНТИРОВАТЬ:
+#   auth_basic "Restricted Access";
+#   auth_basic_user_file /etc/nginx/.htpasswd;
+ 
+# ШАГ 4: проверить и применить
+nginx -t
+systemctl restart nginx
+Итоговый блок server для web.au-team.irpo:
+server {
+    listen 80;
+    server_name web.au-team.irpo;
+ 
+    location / {
+        auth_basic "Restricted Access";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+ 
+        proxy_pass http://<WAN_HQ-RTR>:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+Проверка
+✔ curl http://web.au-team.irpo — 401 Unauthorized
+✔ curl -u WEB:P@ssw0rd http://web.au-team.irpo — страница
+✔ В браузере на HQ-CLI открыть http://web.au-team.irpo — окно ввода логина
+✔ Ввести WEB / P@ssw0rd — открывается приложение
+✔ docker.au-team.irpo НЕ требует авторизации (это только для web.)
+Задание 14: Яндекс Браузер на HQ-CLI
+Установка стороннего ПО на ALT. Способы: epm, RPM, репозиторий, Additional.iso.
+Алгоритм
+su -
+ 
+# Способ 1 (видео-способ, простейший):
+apt-get install -y yandex-browser-stable
+ 
+# Способ 2 — epm:
+epm install yandex-browser-stable
+ 
+# Способ 3 — RPM напрямую:
+curl -L -o /tmp/yandex.rpm 'https://browser-resources.s3.yandex.net/yandex-browser-stable.x86_64.rpm'
+apt-get install -y /tmp/yandex.rpm
+ 
+# Способ 4 — из Additional.iso (если есть):
+mount /dev/cdrom /mnt/iso 2>/dev/null
+ls /mnt/iso/ | grep -i yandex
+apt-get install -y /mnt/iso/yandex-browser*.rpm
+Проверка
+✔ yandex-browser --version
+✔ rpm -qa | grep yandex
+✔ Запустить из меню — открывается браузер
+✔ Сделать скриншот для отчёта
+Финальный чеклист
+Перед сохранением отчёта пройдись по всем пунктам.
+✔ RAID 0 на /dev/md0, ext4, /raid в fstab, /etc/mdadm.conf
+✔ NFS — /raid/nfs экспортируется ОБЕИМ сетям, HQ-CLI И BR-CLI монтируют /mnt/nfs
+✔ Chrony — ISP stratum 5, синхронизированы 4 ALT (HQ-SRV/HQ-CLI/BR-SRV/BR-CLI) + 2 EcoRouter (HQ-RTR/BR-RTR)
+✔ Samba DC — домен поднят, 5 hquser + 5 bruser, группы hq и br
+✔ setexpiry --noexpiry для всех 10 пользователей
+✔ DNS — host br-srv.au-team.irpo возвращает ОДИН правильный адрес
+✔ HQ-CLI И BR-CLI в домене (оба!)
+✔ Ограничение логина: hq → только HQ-CLI, br → только BR-CLI
+✔ Тест: bruser1 НЕ заходит на HQ-CLI, hquser1 НЕ заходит на BR-CLI
+✔ Administrator всё ещё может зайти на оба клиента
+✔ libnss-role enabled на HQ-CLI, hq связана с wheel
+✔ sudo для группы hq разрешает cat/grep/id, остальное запрещено
+✔ Тест: hquser1 может sudo cat, не может sudo ls
+✔ Ansible inventory с 5 хостами (HQ-SRV/HQ-CLI/HQ-RTR/BR-RTR/BR-CLI), все pong
+✔ Docker — контейнер именно 'tespapp' (с опечаткой!) + db, через compose, curl :8080
+✔ Apache + MariaDB — webdb с дампом, curl localhost — страница
+✔ BR-RTR: source И destination правила NAT с hairpin для 8080 и 2026
+✔ HQ-RTR: source И destination правила NAT с hairpin (порты 8080→80!)
+✔ С HQ-CLI: curl http://<WAN_BR-RTR>:8080 — tespapp
+✔ С HQ-CLI: curl http://<WAN_HQ-RTR>:8080 — Apache
+✔ С HQ-CLI: ssh -p 2026 sshadmin@<WAN_HQ-RTR> — на HQ-SRV
+✔ С HQ-CLI: ssh -p 2026 sshadmin@<WAN_BR-RTR> — на BR-SRV
+✔ Nginx — симлинк создан, web.au-team.irpo и docker.au-team.irpo работают
+✔ htpasswd — web.au-team.irpo требует WEB / P@ssw0rd
+✔ Яндекс Браузер на HQ-CLI установлен
+✔ Часовой пояс Europe/Moscow на всех машинах
+✔ Отчёт ФамилияМодуль2 со скриншотами
+Известные проблемы и решения
+DNS возвращает несколько адресов (включая docker0)
+host br-srv.au-team.irpo показывает 10.20.20.2, 172.17.0.1, 172.18.0.1.
+mcedit /etc/samba/smb.conf
+# В [global]:
+    interfaces = ens3 lo
+    bind interfaces only = yes
+ 
+systemctl restart samba
+samba-tool provision падает
+rm -rf /etc/samba/smb.conf
+rm -rf /var/lib/samba/*
+rm -rf /var/cache/samba/*
+samba-tool domain provision ...
+for i in (1..5) — syntax error
+Круглые скобки не работают.
+for i in {1..5}; do ... ; done
+# Только КУДРЯВЫЕ скобки {1..5}!
+Доменный пользователь не может войти
+Причина 1: пароль помечен как просроченный.
+samba-tool user setexpiry hquser1 --noexpiry
+Причина 2: время рассинхронизировано.
+chronyc sources && date
+Причина 3: DNS на клиенте не на BR-SRV.
+Причина 4: ограничение логина срабатывает (если настроено через access_provider).
+Ansible Permission denied
+ssh sshadmin@<IP> -p 2026
+# Если пускает по паролю — проверь sshpass
+rpm -qa | grep sshpass
+apt-get install -y sshpass
+httpd2 не находится
+На ALT сервис называется httpd2, не apache2! Не путай с пакетом — пакет называется apache2-base, а сервис — httpd2.
+docker compose: image not found
+Имя образа в YAML не совпадает с docker images.
+docker image ls
+# Используй ТОЧНО REPOSITORY:TAG из вывода
+NFS не монтируется при загрузке
+В /etc/fstab нет опции _netdev.
+mcedit /etc/fstab
+# Заменить defaults на defaults,_netdev
+RAID собрался под именем md127 а не md0
+Не сделан /etc/mdadm.conf.
+mdadm --detail --scan --verbose | tee -a /etc/mdadm.conf
+# Можно перезагрузиться — после reboot станет md0
+NAT работает извне, но не из внутренней сети
+Не добавлены destination-правила с hairpin.
+configure terminal
+ip nat destination static tcp <outside_ip> <port> <inside_ip> <port> hairpin
+exit
+write memory
+Nginx применил конфиг, но virtual host не работает
+Файл лежит только в sites-available.d, нет симлинка в sites-enabled.d.
+ls /etc/nginx/sites-enabled.d/
+ln -s /etc/nginx/sites-available.d/<conf>.conf /etc/nginx/sites-enabled.d/
+nginx -t && systemctl reload nginx
+htpasswd: command not found
+На ALT пакет называется apache2-htpasswd, не apache2-utils.
+apt-get install -y apache2-htpasswd
+Stuck ARP/L2 на EcoRouter после изменений
+Видео-фишка из Модуля 1, может пригодиться и тут:
+write memory
+reload
+# Полный перезапуск EcoRouter — снимает зависшие ARP/L2
